@@ -459,11 +459,41 @@ class TechnologyDetector:
             if self.verbose:
                 print(f"{Colors.RED}[ERROR] Scanning {url}: {e}{Colors.END}")
             return {}, None
-
+class ExploitDBClient:
+    def __init__(self, verbose=False):
+        self.base_url = "https://www.exploit-db.com/search"
+        self.cache = {}
+        self.verbose = verbose
+    
+    def search_exploit(self, cve_id):
+        """Busca si hay exploit público para un CVE"""
+        if cve_id in self.cache:
+            return self.cache[cve_id]
+        
+        try:
+            # Searchsploit tiene API REST  
+            url = f"https://www.exploit-db.com/search?cve={cve_id}"
+            headers = {'User-Agent': 'HellRecon-Scanner/1.0'}
+            response = requests.get(url, headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                # Analizar si hay resultados
+                if "exploits" in response.text and cve_id in response.text:
+                    exploit_url = f"https://www.exploit-db.com/exploits/?cve={cve_id}"
+                    self.cache[cve_id] = exploit_url
+                    return exploit_url
+        except Exception as e:
+            if self.verbose:
+                print(f"{Colors.YELLOW}[WARNING] ExploitDB search failed: {e}{Colors.END}")
+        
+        self.cache[cve_id] = None
+        return None
+        
 class VulnerabilityChecker:
-    def __init__(self, nvd_client=None, use_nvd=True):
+    def __init__(self, nvd_client=None, use_nvd=True, exploit_client=None):
         self.nvd_client = nvd_client
         self.use_nvd = use_nvd
+        self.exploit_client = exploit_client
         self.KNOWN_VULNS = {
             'Apache': {
                 '2.4.49': ['CVE-2021-41773', 'CVE-2021-42013'],
@@ -504,7 +534,20 @@ class VulnerabilityChecker:
             nvd_vulns = self.nvd_client.search_cves(tech_name, version)
             vulns.extend(nvd_vulns)
         return list(set(vulns))
-
+        
+    def check_technology_with_exploits(self, tech_name, version):
+        """Versión mejorada que también busca exploits"""
+        vulns = self.check_technology(tech_name, version)
+        
+        exploits_info = {}
+        if self.exploit_client and vulns:
+            for cve in vulns:
+                exploit_url = self.exploit_client.search_exploit(cve)
+                if exploit_url:
+                    exploits_info[cve] = exploit_url
+        
+        return vulns, exploits_info
+        
     def _is_similar_version(self, version1, version2):
         try:
             v1_parts = version1.split('.')
