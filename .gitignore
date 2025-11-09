@@ -1,0 +1,7 @@
+# Configuración local con API keys
+.hellrecon/
+*.local
+config.json
+__pycache__/
+*.pyc
+*.log
