@@ -596,16 +596,18 @@ class ReportGenerator:
 <head>
     <title>HellRecon Scan Report</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        .header { background: #2c3e50; color: white; padding: 20px; border-radius: 5px; }
-        .technology { margin: 10px 0; padding: 10px; border-left: 4px solid #3498db; }
-        .vulnerable { border-left-color: #e74c3c; background: #fdf2f2; }
-        .safe { border-left-color: #27ae60; }
-        .vuln-list { margin-left: 20px; color: #c0392b; }
-        .stats { background: #ecf0f1; padding: 15px; border-radius: 5px; margin: 20px 0; }
-        .target-section { margin: 30px 0; }
-        a { color: #2980b9; text-decoration: none; }
-        a:hover { text-decoration: underline; }
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        .header {{ background: #2c3e50; color: white; padding: 20px; border-radius: 5px; }}
+        .technology {{ margin: 10px 0; padding: 10px; border-left: 4px solid #3498db; }}
+        .vulnerable {{ border-left-color: #e74c3c; background: #fdf2f2; }}
+        .safe {{ border-left-color: #27ae60; }}
+        .vuln-list {{ margin-left: 20px; color: #c0392b; }}
+        .exploit-list {{ margin-left: 30px; color: #d35400; font-size: 0.9em; }}
+        .stats {{ background: #ecf0f1; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+        .target-section {{ margin: 30px 0; }}
+        a {{ color: #2980b9; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        .exploit {{ background: #fff3cd; padding: 5px; margin: 2px 0; border-radius: 3px; }}
     </style>
 </head>
 <body>
@@ -618,6 +620,7 @@ class ReportGenerator:
         <p>Targets Scanned: {target_count}</p>
         <p>Total Technologies Found: {tech_count}</p>
         <p>Total Vulnerabilities: {vuln_count}</p>
+        <p>Total Exploits Found: {exploit_count}</p>
     </div>
     {content}
 </body>
@@ -625,33 +628,60 @@ class ReportGenerator:
         content = ""
         total_tech = 0
         total_vuln = 0
+        total_exploit = 0
+        
         for target, data in scan_results.items():
-            content += f'<div class="target-section">'
+            content += '<div class="target-section">'
             content += f"<h2>Target: {target}</h2>"
             technologies = data['technologies']
             vuln_checker = data['vuln_checker']
+            
             for tech, info in technologies.items():
                 total_tech += 1
                 version = info['version']
                 tech_type = info['type']
-                vulns = vuln_checker.check_technology(tech, version)
+                
+                # USAR LA FUNCIÓN CON EXPLOITS
+                if hasattr(vuln_checker, 'check_technology_with_exploits'):
+                    vulns, exploits = vuln_checker.check_technology_with_exploits(tech, version)
+                else:
+                    vulns = vuln_checker.check_technology(tech, version)
+                    exploits = {}
+                
                 total_vuln += len(vulns)
+                total_exploit += len(exploits)
+                
                 vuln_class = "vulnerable" if vulns else "safe"
                 content += f'<div class="technology {vuln_class}"><strong>{tech} {version}</strong> - {tech_type}'
+                
                 if vulns:
                     content += "<div class='vuln-list'>"
                     for vuln in vulns:
-                        content += f'<div><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name={vuln}" target="_blank">{vuln}</a></div>'
+                        content += f'<div><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name={vuln}" target="_blank">{vuln}</a>'
+                        
+                        # AÑADIR EXPLOITS SI HAY
+                        if vuln in exploits and exploits[vuln]:
+                            content += "<div class='exploit-list'>"
+                            for exploit in exploits[vuln][:2]:  # Max 2 exploits
+                                title = exploit.get('title', 'Unknown')
+                                path = exploit.get('path', '')
+                                filename = os.path.basename(path) if path else "Unknown"
+                                content += f'<div class="exploit"><strong>Exploit:</strong> {title} <em>({filename})</em></div>'
+                            content += "</div>"
+                        content += "</div>"
                     content += "</div>"
                 content += "</div>"
             content += '</div>'
+        
         html_content = html_template.format(
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             target_count=len(scan_results),
             tech_count=total_tech,
             vuln_count=total_vuln,
+            exploit_count=total_exploit,
             content=content
         )
+        
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
         print(f"{Colors.GREEN}[+] HTML report generated: {output_file}{Colors.END}")
