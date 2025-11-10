@@ -4,6 +4,7 @@ HellRecon - Advanced technology scanner with vulnerability intelligence
 Author: akil3s
 """
 
+import subprocess
 import requests
 import sys
 import re
@@ -459,32 +460,61 @@ class TechnologyDetector:
             if self.verbose:
                 print(f"{Colors.RED}[ERROR] Scanning {url}: {e}{Colors.END}")
             return {}, None
-class ExploitDBClient:
+class SearchSploitClient:
     def __init__(self, verbose=False):
-        self.base_url = "https://www.exploit-db.com/search"
-        self.cache = {}
         self.verbose = verbose
+        self.cache = {}
+    
+    def update_database(self):
+        """Actualiza la base de datos de SearchSploit"""
+        try:
+            print(f"{Colors.CYAN}[*] Updating SearchSploit database...{Colors.END}")
+            print(f"{Colors.YELLOW}[INFO] This may take several minutes. Be patient...{Colors.END}")
+            
+            # Redirigir stderr para silenciar warnings de apt
+            result = subprocess.run(['searchsploit', '-u'], 
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, timeout=300)
+            
+            if result.returncode == 0:
+                print(f"{Colors.GREEN}[+] SearchSploit database updated successfully{Colors.END}")
+                return True
+            else:
+                print(f"{Colors.YELLOW}[WARNING] SearchSploit update completed with warnings{Colors.END}")
+                return True
+        except subprocess.TimeoutExpired:
+            print(f"{Colors.YELLOW}[WARNING] SearchSploit update timed out. Using existing database.{Colors.END}")
+            return True
+        except Exception as e:
+            print(f"{Colors.YELLOW}[WARNING] SearchSploit update error: {e}. Using existing database.{Colors.END}")
+            return True
     
     def search_exploit(self, cve_id):
-        """Busca si hay exploit público para un CVE"""
+        """Busca exploits para un CVE usando SearchSploit"""
         if cve_id in self.cache:
             return self.cache[cve_id]
         
         try:
-            # Searchsploit tiene API REST  
-            url = f"https://www.exploit-db.com/search?cve={cve_id}"
-            headers = {'User-Agent': 'HellRecon-Scanner/1.0'}
-            response = requests.get(url, headers=headers, timeout=5)
+            # Searchsploit busca por CVE
+            result = subprocess.run(['searchsploit', '--cve', cve_id, '--json'], 
+                                  capture_output=True, text=True, timeout=10)
             
-            if response.status_code == 200:
-                # Analizar si hay resultados
-                if "exploits" in response.text and cve_id in response.text:
-                    exploit_url = f"https://www.exploit-db.com/exploits/?cve={cve_id}"
-                    self.cache[cve_id] = exploit_url
-                    return exploit_url
+            if result.returncode == 0 and result.stdout:
+                data = json.loads(result.stdout)
+                if data.get('RESULTS_EXPLOIT'):
+                    # Encontramos exploits - devolver info
+                    exploits = []
+                    for exploit in data['RESULTS_EXPLOIT']:
+                        exploits.append({
+                            'title': exploit.get('Title', ''),
+                            'path': exploit.get('Path', ''),
+                            'date': exploit.get('Date', '')
+                        })
+                    self.cache[cve_id] = exploits
+                    return exploits
         except Exception as e:
             if self.verbose:
-                print(f"{Colors.YELLOW}[WARNING] ExploitDB search failed: {e}{Colors.END}")
+                print(f"{Colors.YELLOW}[WARNING] SearchSploit search failed for {cve_id}: {e}{Colors.END}")
         
         self.cache[cve_id] = None
         return None
@@ -641,11 +671,25 @@ class ReportGenerator:
                     writer.writerow([target, tech, version, tech_type, '; '.join(vulns) if vulns else 'None'])
         print(f"{Colors.GREEN}[+] CSV report generated: {output_file}{Colors.END}")
 
-def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None):
+def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searchsploit=False):
     detector = TechnologyDetector(verbose=verbose)
     nvd_client = NVDClient(nvd_key) if use_nvd else None
-    vuln_checker = VulnerabilityChecker(nvd_client, use_nvd)
-    technologies, response = detector.scan_target(url)
+    searchsploit_client = SearchSploitClient(verbose=verbose) if use_searchsploit else None
+    vuln_checker = VulnerabilityChecker(nvd_client, use_nvd, searchsploit_client)
+    
+    try:
+        response = detector.session.get(url, timeout=10, allow_redirects=True)
+        technologies = {}
+        tech_from_headers = detector.detect_from_headers(response.headers)
+        technologies.update(tech_from_headers)
+        tech_from_content = detector.detect_from_content(response.text)
+        technologies.update(tech_from_content)
+    except Exception as e:
+        if verbose:
+            print(f"{Colors.RED}[ERROR] Scanning {url}: {e}{Colors.END}")
+        technologies = {}
+        response = None
+    
     return {
         'technologies': technologies,
         'vuln_checker': vuln_checker,
@@ -663,6 +707,8 @@ def main():
     parser.add_argument('--timeout', type=int, default=10, help='Request timeout')
     parser.add_argument('-v', '--verbose', action='store_true', help='Show debug information')
     parser.add_argument('--no-nvd', action='store_true', help='Disable NVD API lookups')
+    parser.add_argument('--searchsploit', action='store_true', help='Enable SearchSploit lookups')
+    parser.add_argument('--update-searchsploit', action='store_true', help='Update SearchSploit database before scanning')
     parser.add_argument('--threads', type=int, default=5, help='Number of threads for batch scanning')
     args = parser.parse_args()
 
@@ -690,7 +736,11 @@ def main():
     if not valid_targets:
         print(f"{Colors.RED}[ERROR] No valid URLs found.{Colors.END}")
         sys.exit(1)
-
+    # Actualizar SearchSploit si se solicita
+    if args.update_searchsploit:
+        client = SearchSploitClient(verbose=args.verbose)
+        client.update_database()
+        
     print(f"{Colors.CYAN}[*] Starting scan of {len(valid_targets)} target(s){Colors.END}")
     print(f"{Colors.CYAN}[*] Threads: {args.threads} | NVD: {not args.no_nvd} | Format: {args.format}{Colors.END}")
     print("-" * 60)
@@ -699,12 +749,12 @@ def main():
     scan_results = {}
 
     if len(valid_targets) == 1:
-        result = scan_single_target(valid_targets[0], args.verbose, not args.no_nvd, args.nvd_key)
+        result = scan_single_target(valid_targets[0], args.verbose, not args.no_nvd, args.nvd_key, args.searchsploit)
         scan_results[valid_targets[0]] = result
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
             future_to_url = {
-                executor.submit(scan_single_target, url, args.verbose, not args.no_nvd, args.nvd_key): url
+                executor.submit(scan_single_target, url, args.verbose, not args.no_nvd, args.nvd_key, args.searchsploit)
                 for url in valid_targets
             }
             for future in concurrent.futures.as_completed(future_to_url):
@@ -715,7 +765,10 @@ def main():
                     print(f"{Colors.GREEN}[+] Completed: {url}{Colors.END}")
                 except Exception as e:
                     print(f"{Colors.RED}[ERROR] Failed scanning {url}: {e}{Colors.END}")
-
+    # DEBUG: Ver qué tenemos en los resultados
+    print(f"{Colors.CYAN}[DEBUG] Total targets in scan_results: {len(scan_results)}{Colors.END}")
+    for url, data in scan_results.items():
+        print(f"{Colors.CYAN}[DEBUG] Target: {url} -> {len(data['technologies'])} technologies{Colors.END}")
     total_tech = 0
     total_vuln = 0
     for url, data in scan_results.items():
@@ -724,28 +777,47 @@ def main():
         if technologies:
             print(f"\n{Colors.CYAN}[*] Results for: {url}{Colors.END}")
             print("-" * 50)
-            for tech, info in technologies.items():
-                total_tech += 1
-                version = info['version']
-                tech_type = info['type']
-                confidence = info['confidence']
-                icons = {
-                    'server': '[SERVER]', 'cms': '[CMS]', 'framework': '[FRAMEWORK]', 'language': '[LANGUAGE]',
-                    'os': '[OS]', 'javascript': '[JS]', 'feature': '[FEATURE]', 'control_panel': '[PANEL]',
-                    'waf': '[WAF]', 'cdn': '[CDN]'
-                }
-                icon = icons.get(tech_type, '[?]')
+        for tech, info in technologies.items():
+            total_tech += 1
+            version = info['version']
+            tech_type = info['type']
+            confidence = info['confidence']
+            icons = {
+                'server': '[SERVER]', 'cms': '[CMS]', 'framework': '[FRAMEWORK]', 'language': '[LANGUAGE]',
+                'os': '[OS]', 'javascript': '[JS]', 'feature': '[FEATURE]', 'control_panel': '[PANEL]',
+                'waf': '[WAF]', 'cdn': '[CDN]'
+            }
+            icon = icons.get(tech_type, '[?]')
+            
+            # USAR LA NUEVA FUNCIÓN CON EXPLOITS
+            if hasattr(vuln_checker, 'check_technology_with_exploits'):
+                vulns, exploits = vuln_checker.check_technology_with_exploits(tech, version)
+            else:
                 vulns = vuln_checker.check_technology(tech, version)
-                total_vuln += len(vulns)
-                if vulns:
-                    print(f"{icon} {Colors.RED}{tech} {version}{Colors.END} - {tech_type}")
-                    for vuln in vulns:
+                exploits = {}
+            
+            total_vuln += len(vulns)
+            if vulns:
+                print(f"{icon} {Colors.RED}{tech} {version}{Colors.END} - {tech_type}")
+                for vuln in vulns:
+                    if vuln in exploits:
+                        exploit_info = exploits[vuln]
+                        if exploit_info and len(exploit_info) > 0:
+                            print(f"   └── {Colors.RED}{vuln}{Colors.END}")
+                            for i, exploit in enumerate(exploit_info[:2]):  # Mostrar max 2 exploits
+                                title = exploit.get('title', 'Unknown')
+                                path = exploit.get('path', '')
+                                filename = os.path.basename(path) if path else "Unknown"
+                                
+                                # COLORES EPICOS - SE VE EN CUALQUIER TERMINAL
+                                print(f"       {Colors.MAGENTA}╔═[EXPLOIT {i+1}]{Colors.END}")
+                                print(f"       {Colors.MAGENTA}║  {Colors.CYAN}{title}{Colors.END}")
+                                print(f"       {Colors.MAGENTA}╚═>{Colors.GREEN} {filename}{Colors.END}")
+                    else:
                         print(f"   └── {Colors.RED}{vuln}{Colors.END}")
-                else:
-                    color = Colors.GREEN if confidence == 'high' else Colors.YELLOW
-                    print(f"{icon} {color}{tech} {version}{Colors.END} - {tech_type}")
-        else:
-            print(f"{Colors.YELLOW}[!] No technologies found for {url}{Colors.END}")
+            else:  
+                color = Colors.GREEN if confidence == 'high' else Colors.YELLOW
+                print(f"{icon} {color}{tech} {version}{Colors.END} - {tech_type}")
 
     if args.output:
         if args.format == 'html':
