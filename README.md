@@ -3,7 +3,7 @@ Advanced Technology Intelligence Scanner with Vulnerability and Exploit Integrat
 # HellRecon PRO v2.1
 
 ## Features:
-- Detection of 50+ technologies (servers, CMS, frameworks, WAFs, CDNs)
+- **Detection of 50+ technologies** (servers, CMS, frameworks, WAFs, CDNs)
 - **Multi-layer WordPress version detection** with intelligent scoring system
 - **WordPress plugin and theme detection** with version extraction  
 - **Advanced validation systems** to eliminate false positives
@@ -41,6 +41,7 @@ Advanced Technology Intelligence Scanner with Vulnerability and Exploit Integrat
 
 # Installation
 git clone https://github.com/akil3s79/hellRecon
+
 cd hellRecon
 
 (SearchSploit comes pre-installed in Kali Linux)
@@ -56,7 +57,7 @@ This tool is intended for:
 - **Security research**  
 - **Educational purposes**
 
-Only use HellRecon on systems you own or have explicit permission to test.
+**Only use HellRecon on systems you own or have explicit permission to test.**
 
 ## Contributing
 Found a bug? Have a feature request? Feel free to open an issue or pull request!
