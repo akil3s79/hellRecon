@@ -15,9 +15,21 @@ import time
 import concurrent.futures
 import hashlib
 import urllib.parse
+import signal
 from datetime import datetime
 from argparse import ArgumentParser
 from urllib3.exceptions import InsecureRequestWarning
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C for graceful exit"""
+    print(f"\n{Colors.RED}[!] Scan interrupted by user. Shutting down...{Colors.END}")
+    sys.exit(0)
+
+# Register signal handler
+try:
+    signal.signal(signal.SIGINT, signal_handler)
+except ImportError:
+    pass
 
 def load_nvd_api_key():
     """Load NVD API key from configuration file"""
@@ -46,12 +58,12 @@ class Colors:
     ORANGE = '\033[33m' if USE_COLORS else ''
     END = '\033[0m' if USE_COLORS else ''
 
-def show_banner():
+def show_banner(method='GET'):
     print(f"""{Colors.MAGENTA}
     ╔══════════════════════════════════════════════════╗
-    ║                   HellRecon PRO                  ║
+    ║                  HellRecon PRO v2.1              ║
     ║           Technology Intelligence Scanner        ║
-    ║               HTTP method: GET                   ║
+    ║               HTTP method: {method:<8}           ║
     ╚══════════════════════════════════════════════════╝{Colors.END}
     """)
 
@@ -106,7 +118,7 @@ class TechnologyDetector:
             'Nginx': r'nginx[/\s](\d+\.\d+(\.\d+)?)',
             'IIS': r'Microsoft-IIS[/\s](\d+\.\d+)',
             'LiteSpeed': r'LiteSpeed',
-            'Tomcat': r'Tomcat[/\s](\d+\.\d+(\.\d+)?)',
+            'Tomcat': r'Tomcat[/\s]?(\d+\.\d+(\.\d+)?)|Apache-Coyote|JSESSIONID|Apache.Tomcat/(\d+\.\d+(\.\d+)?)|<title>Apache Tomcat/(\d+\.\d+(\.\d+)?)</title>',
             'OpenResty': r'openresty[/\s](\d+\.\d+(\.\d+)?)',
         },
         'cms': {
@@ -184,7 +196,111 @@ class TechnologyDetector:
             'SQLite': r'sqlite|SQLite'
         }
     }
-    
+
+    def __init__(self, verbose=False, method='GET', user_agent=None, delay=0):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        })
+        self.session.verify = False
+        self.verbose = verbose
+        self.method = method
+        self.delay = delay
+
+    def auto_detect_method(self, url):
+        """Auto-detect best HTTP method based on WAF detection"""
+        methods = ['HEAD', 'GET', 'POST']
+        
+        for method in methods:
+            try:
+                if method == 'HEAD':
+                    response = self.session.head(url, timeout=5, allow_redirects=True)
+                elif method == 'GET':
+                    response = self.session.get(url, timeout=5, allow_redirects=True)
+                elif method == 'POST':
+                    response = self.session.post(url, data={'test': 'scan'}, timeout=5, allow_redirects=True)
+                
+                if response.status_code == 200:
+                    # Check for WAF indicators
+                    headers_str = str(response.headers).lower()
+                    waf_indicators = ['cloudflare', 'akamai', 'imperva', 'f5', 'barracuda', 'fortinet']
+                    
+                    if any(waf in headers_str for waf in waf_indicators):
+                        if self.verbose:
+                            print(f"{Colors.YELLOW}[*] WAF detected, preferring POST method{Colors.END}")
+                        return 'POST'  # POST often bypasses WAFs better
+                    
+                    return method  # Use first working method
+                    
+            except Exception:
+                continue
+        
+        return 'GET'  # Default fallback
+
+    def aggressive_tomcat_version_hunt(self, base_url):
+        """Aggressive Tomcat version detection"""
+        tomcat_paths = {
+            '/docs/': r'Apache Tomcat/(\d+\.\d+\.\d+)',
+            '/manager/': r'Tomcat Manager Application.*?(\d+\.\d+\.\d+)',
+            '/host-manager/': r'Tomcat Host Manager.*?(\d+\.\d+\.\d+)',
+            '/examples/': r'Apache Tomcat/(\d+\.\d+\.\d+)',
+        }
+        
+        for path, pattern in tomcat_paths.items():
+            try:
+                full_url = base_url.rstrip('/') + path
+                response = self.session.get(full_url, timeout=8, allow_redirects=True)
+                if response.status_code == 200:
+                    match = re.search(pattern, response.text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        return match.group(1)
+            except Exception:
+                continue
+        return None
+
+    def aggressive_jboss_detection(self, base_url):
+        """Aggressive JBoss version and configuration detection"""
+        jboss_paths = {
+            '/web-console/': r'JBoss[^\d]*(\d+\.\d+(\.\d+)?)',
+            '/jmx-console/': r'JBoss[^\d]*(\d+\.\d+(\.\d+)?)',
+            '/admin-console/': r'JBoss[^\d]*(\d+\.\d+(\.\d+)?)',
+            '/status/': r'JBoss[^\d]*(\d+\.\d+(\.\d+)?)',
+        }
+        
+        for path, pattern in jboss_paths.items():
+            try:
+                full_url = base_url.rstrip('/') + path
+                response = self.session.get(full_url, timeout=8, allow_redirects=True)
+                if response.status_code == 200:
+                    match = re.search(pattern, response.text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        return match.group(1)
+            except Exception:
+                continue
+        return None
+
+    def aggressive_weblogic_detection(self, base_url):
+        """Aggressive WebLogic version detection"""
+        weblogic_paths = {
+            '/console/': r'WebLogic Server.*?(\d+\.\d+(\.\d+)?)',
+            '/console/login/': r'WebLogic Server.*?(\d+\.\d+(\.\d+)?)',
+            '/ws_utc/': r'WebLogic',
+            '/bea_wls_deployment_internal/': r'WebLogic',
+        }
+        
+        for path, pattern in weblogic_paths.items():
+            try:
+                full_url = base_url.rstrip('/') + path
+                response = self.session.get(full_url, timeout=8, allow_redirects=True)
+                if response.status_code == 200:
+                    match = re.search(pattern, response.text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        return match.group(1) if match.groups() else 'Unknown'
+            except Exception:
+                continue
+        return None
+
     def wp_checksum_analysis(self, base_url):
         """WordPress version detection via file checksums and GPL source analysis"""
         if self.verbose:
@@ -287,17 +403,41 @@ class TechnologyDetector:
             return best_version
         
         return None
-    
+
     def scan_target(self, url, deep_wp_scan=False):
         """Scan a single target and return technologies and response"""
         if self.verbose:
-            print(f"{Colors.CYAN}[*] Scanning: {url}{Colors.END}")
+            print(f"{Colors.CYAN}[*] Scanning: {url} [{self.method}]{Colors.END}")
+        
+        technologies = {}
         try:
-            response = self.session.get(url, timeout=10, allow_redirects=True)
-            technologies = {}
+            # Apply delay if configured
+            if self.delay > 0:
+                time.sleep(self.delay)
+                
+            # Multi-method support
+            if self.method == 'POST':
+                response = self.session.post(url, data={'scan': 'hellrecon'}, timeout=10, allow_redirects=True)
+            elif self.method == 'HEAD':
+                response = self.session.head(url, timeout=10, allow_redirects=True)
+            else:  # GET
+                response = self.session.get(url, timeout=10, allow_redirects=True)
+
             tech_from_headers = self.detect_from_headers(response.headers)
             technologies.update(tech_from_headers)
-            tech_from_content = self.detect_from_content(response.text)
+            # tech_from_content = self.detect_from_content(response.text)
+            tech_from_content = {}
+            # Buscar Tomcat directamente en el título
+            title_match = re.search(r'<title>Apache Tomcat/(\d+\.\d+(\.\d+)?)</title>', response.text, re.IGNORECASE)
+            if title_match:
+                tech_from_content['Tomcat'] = {
+                    'type': 'server',
+                    'version': title_match.group(1),
+                    'confidence': 'high',
+                    'source': 'html_title'
+                }
+                if verbose:
+                    print(f"{Colors.CYAN}[DIRECT SCAN] Found Tomcat {title_match.group(1)} in HTML title{Colors.END}")
             technologies.update(tech_from_content)
             
             # Deep WordPress scanning for hardened sites
@@ -320,15 +460,6 @@ class TechnologyDetector:
             if self.verbose:
                 print(f"{Colors.RED}[ERROR] Scanning {url}: {e}{Colors.END}")
             return {}, None
-        
-    def __init__(self, verbose=False):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        })
-        self.session.verify = False
-        self.verbose = verbose
 
     def detect_from_headers(self, headers):
         technologies = {}
@@ -351,7 +482,16 @@ class TechnologyDetector:
                 # Special case for Apache-Coyote
                 if server == 'Apache' and 'Apache-Coyote' in server_header:
                     version = 'Tomcat-Coyote'
-                    
+                # Special cases for embedded servers
+                if server == 'Apache' and 'Apache-Coyote' in server_header:
+                    # This is actually Tomcat
+                    technologies['Tomcat'] = {
+                        'type': 'server', 
+                        'version': 'Tomcat-Coyote',
+                        'confidence': 'high',
+                        'source': 'header'
+                    }
+                    continue  # Skip adding Apache    
                 technologies[server] = {
                     'type': 'server',
                     'version': version,
@@ -451,8 +591,47 @@ class TechnologyDetector:
                     }
         return technologies
 
+    def parse_html_metadata(self, content):
+        """Parse obvious version information from HTML metadata"""
+        metadata_tech = {}
+        
+        # Search in meta tags
+        meta_generator = re.search(r'<meta name="generator" content="([^"]+)"', content, re.IGNORECASE)
+        if meta_generator:
+            generator_content = meta_generator.group(1)
+            # Detect Tomcat in generator
+            tomcat_match = re.search(r'Tomcat[/\s]?(\d+\.\d+(\.\d+)?)', generator_content, re.IGNORECASE)
+            if tomcat_match:
+                metadata_tech['Tomcat'] = {
+                    'type': 'server', 
+                    'version': tomcat_match.group(1),
+                    'confidence': 'high',
+                    'source': 'meta_generator'
+                }
+        
+        # Search in titles
+        title_match = re.search(r'<title>Apache Tomcat/(\d+\.\d+(\.\d+)?)</title>', content, re.IGNORECASE)
+        if title_match:
+            metadata_tech['Tomcat'] = {
+                'type': 'server',
+                'version': title_match.group(1), 
+                'confidence': 'high',
+                'source': 'html_title'
+            }
+        
+        return metadata_tech
+
     def detect_from_content(self, content):                    
         technologies = {}
+        
+        # NEW: Parse HTML metadata first
+        metadata_tech = self.parse_html_metadata(content)
+        technologies.update(metadata_tech)
+        
+        # If we found Tomcat in metadata, we're done
+        if 'Tomcat' in technologies:
+            return technologies
+        
         comment_pattern = r'<!--.*?-->'
         comments = re.findall(comment_pattern, content)
            
@@ -476,6 +655,108 @@ class TechnologyDetector:
                         'source': 'comment'
                     }
 
+        # Search for Tomcat in page title
+        title_match = re.search(r'<title>Apache Tomcat/(\d+\.\d+(\.\d+)?)</title>', content, re.IGNORECASE)
+        if title_match:
+            technologies['Tomcat'] = {
+                'type': 'server',
+                'version': title_match.group(1),
+                'confidence': 'high',
+                'source': 'html_title'
+            }
+            if self.verbose:
+                print(f"{Colors.CYAN}[TITLE SCAN] Found Tomcat {title_match.group(1)} in HTML title{Colors.END}")
+
+        # Search for Tomcat anywhere in content
+        tomcat_patterns = [
+            r'Apache Tomcat/(\d+\.\d+(\.\d+)?)',
+            r'Tomcat[/\s]?(\d+\.\d+(\.\d+)?)',
+        ]
+        
+        for pattern in tomcat_patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match and 'Tomcat' not in technologies:
+                version = match.group(1)
+                technologies['Tomcat'] = {
+                    'type': 'server',
+                    'version': version,
+                    'confidence': 'medium',
+                    'source': 'content_scan'
+                }
+                break
+
+        # Rest of the existing detection code
+        wp_links_urls = ['/wp-links-opml.php', '/wp-includes/wlwmanifest.xml', '/wp-json/wp/v2/', '/readme.html']
+        for wp_path in wp_links_urls:
+            if wp_path in content:
+                try:
+                    version_match = re.search(r'WordPress (\d+\.\d+(\.\d+)?)', content)
+                    if version_match:
+                        technologies['WordPress'] = {
+                            'type': 'cms',
+                            'version': version_match.group(1),
+                            'confidence': 'high',
+                            'source': 'wp_specific_file'
+                        }
+                    elif 'WordPress' not in technologies:
+                        technologies['WordPress'] = {
+                            'type': 'cms',
+                            'version': 'Unknown',
+                            'confidence': 'high',
+                            'source': 'wp_specific_file'
+                        }
+                    break
+                except Exception:
+                    pass
+
+        # [MANTEN EL RESTO DEL CÓDIGO ORIGINAL AQUÍ - desde wp_version_patterns hasta el final]
+        # Advanced WordPress version detection
+        wp_version_patterns = [
+            r'<meta name="generator" content="WordPress (\d+\.\d+(\.\d+)?)"',
+            r'wp-includes/js/wp-embed.min.js\?ver=(\d+\.\d+(\.\d+)?)',
+            r'wp-includes/css/dist/block-library/style.min.css\?ver=(\d+\.\d+(\.\d+)?)',
+            r'Version (\d+\.\d+(\.\d+)?)',
+            r'wp-includes/js/jquery/jquery.js\?ver=(\d+\.\d+(\.\d+)?)',
+            r'wp-content/themes/.+?/style.css\?ver=(\d+\.\d+(\.\d+)?)',
+            r'wp-content/plugins/.+?/.+?\.js\?ver=(\d+\.\d+(\.\d+)?)'
+        ]
+
+        for pattern in wp_version_patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match and match.group(1):
+                technologies['WordPress'] = {
+                    'type': 'cms',
+                    'version': match.group(1),
+                    'confidence': 'high',
+                    'source': 'meta_tag' if 'meta' in pattern else 'file_version'
+                }
+                break
+
+        # [SIGUE CON TODO EL RESTO DEL CÓDIGO ORIGINAL...]
+        # WooCommerce version detection
+        wc_patterns = [
+            r'woocommerce/assets/js/frontend/(.+?)\.js\?ver=(\d+\.\d+(\.\d+)?)',
+            r'Woocommerce.*?(\d+\.\d+(\.\d+)?)',
+            r'wc-(.+?)-(\d+\.\d+(\.\d+)?)'
+        ]
+
+        for pattern in wc_patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                version = None
+                for group in match.groups():
+                    if group and re.match(r'\d+\.\d+(\.\d+)?', str(group)):
+                        version = group
+                        break
+                if version:
+                    technologies['WooCommerce'] = {
+                        'type': 'cms', 
+                        'version': version,
+                        'confidence': 'medium',
+                        'source': 'file_version'
+                    }
+                    break
+                
         version_patterns = {
             'Bootstrap': [
                 r'bootstrap[.-](\d+\.\d+(\.\d+)?)\.(js|css)',
@@ -501,74 +782,6 @@ class TechnologyDetector:
             ]
         }
 
-        wp_links_urls = ['/wp-links-opml.php', '/wp-includes/wlwmanifest.xml', '/wp-json/wp/v2/', '/readme.html']
-        for wp_path in wp_links_urls:
-            if wp_path in content:
-                try:
-                    version_match = re.search(r'WordPress (\d+\.\d+(\.\d+)?)', content)
-                    if version_match:
-                        technologies['WordPress'] = {
-                            'type': 'cms',
-                            'version': version_match.group(1),
-                            'confidence': 'high',
-                            'source': 'wp_specific_file'
-                        }
-                    elif 'WordPress' not in technologies:
-                        technologies['WordPress'] = {
-                            'type': 'cms',
-                            'version': 'Unknown',
-                            'confidence': 'high',
-                            'source': 'wp_specific_file'
-                        }
-                    break
-                except Exception:
-                    pass
-        # Advanced WordPress version detection
-        wp_version_patterns = [
-            r'<meta name="generator" content="WordPress (\d+\.\d+(\.\d+)?)"',
-            r'wp-includes/js/wp-embed.min.js\?ver=(\d+\.\d+(\.\d+)?)',
-            r'wp-includes/css/dist/block-library/style.min.css\?ver=(\d+\.\d+(\.\d+)?)',
-            r'Version (\d+\.\d+(\.\d+)?)'  # In readme.html
-            r'wp-includes/js/jquery/jquery.js\?ver=(\d+\.\d+(\.\d+)?)',  # jQuery version can hint WP version
-            r'wp-content/themes/.+?/style.css\?ver=(\d+\.\d+(\.\d+)?)',  # Theme versions
-            r'wp-content/plugins/.+?/.+?\.js\?ver=(\d+\.\d+(\.\d+)?)'    # Plugin versions
-        ]
-
-        for pattern in wp_version_patterns:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match and match.group(1):
-                technologies['WordPress'] = {
-                    'type': 'cms',
-                    'version': match.group(1),
-                    'confidence': 'high',
-                    'source': 'meta_tag' if 'meta' in pattern else 'file_version'
-                }
-                break
-        # WooCommerce version detection
-        wc_patterns = [
-            r'woocommerce/assets/js/frontend/(.+?)\.js\?ver=(\d+\.\d+(\.\d+)?)',
-            r'Woocommerce.*?(\d+\.\d+(\.\d+)?)',
-            r'wc-(.+?)-(\d+\.\d+(\.\d+)?)'
-        ]
-
-        for pattern in wc_patterns:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
-                # Extract version from different group positions
-                version = None
-                for group in match.groups():
-                    if group and re.match(r'\d+\.\d+(\.\d+)?', str(group)):
-                        version = group
-                        break
-                if version:
-                    technologies['WooCommerce'] = {
-                        'type': 'cms', 
-                        'version': version,
-                        'confidence': 'medium',
-                        'source': 'file_version'
-                    }
-                    break
-            
         for tech, patterns in version_patterns.items():
             for pattern in patterns:
                 match = re.search(pattern, content, re.IGNORECASE)
@@ -642,7 +855,7 @@ class TechnologyDetector:
                         'confidence': 'medium',
                         'source': 'content'
                     }
-    
+
         # Database detection
         for db, pattern in self.PATTERNS['databases'].items():
             if re.search(pattern, content, re.IGNORECASE) and db not in technologies:
@@ -652,6 +865,7 @@ class TechnologyDetector:
                     'confidence': 'low',
                     'source': 'content'
                 }
+
         # Advanced WordPress version fuzzing for hardened sites
         if 'WordPress' in technologies and technologies['WordPress']['version'] == 'Unknown':
             wp_fuzz_paths = [
@@ -660,14 +874,10 @@ class TechnologyDetector:
                 '/wp-admin/install.php',
                 '/wp-login.php'
             ]
-            
-            # We'd need to make additional requests to these paths
-            # This would require modifying scan_target to check multiple URLs
-            technologies['WordPress']['confidence'] = 'medium'  # Lower confidence for hardened sites
-        
+            technologies['WordPress']['confidence'] = 'medium'
+
         # WordPress plugin and theme detection
         if 'WordPress' in technologies:
-            # Plugin detection
             plugin_patterns = {
                 'Yoast SEO': r'wp-content/plugins/wordpress-seo/',
                 'Contact Form 7': r'wp-content/plugins/contact-form-7/', 
@@ -685,7 +895,6 @@ class TechnologyDetector:
                         'source': 'content'
                     }
             
-            # Theme detection  
             theme_match = re.search(r'wp-content/themes/([^/]+)/', content, re.IGNORECASE)
             if theme_match:
                 theme_name = theme_match.group(1)
@@ -697,7 +906,7 @@ class TechnologyDetector:
                 }
 
         return technologies
-        
+
     def deep_wp_version_scan(self, base_url):
         """Deep scan for WordPress version in common files"""
         wp_version_files = {
@@ -747,7 +956,7 @@ class TechnologyDetector:
                         match = re.search(pattern, content, re.IGNORECASE)
                         if match:
                             version = match.group(1)
-                            # VALIDACIÓN EN TIEMPO REAL - solo aceptar versiones plausibles
+                            # EAL-TIME VALIDATION - only accept plausible versions
                             if version and re.match(r'^\d+\.\d+(\.\d+)?$', version) and len(version) >= 3:
                                 found_versions[version] = found_versions.get(version, 0) + 1
                                 if self.verbose:
@@ -1020,7 +1229,6 @@ class TechnologyDetector:
         
         return None
 
-    # Add to the detect_from_content method or create a specific method
     def detect_plugin_versions(self, base_url):
         """Detect versions for common WordPress plugins"""
         plugin_version_patterns = {
@@ -1086,7 +1294,11 @@ class TechnologyDetector:
         
         return 'Unknown'
 
+# REST OF THE CODE REMAINS THE SAME (SearchSploitClient, VulnerabilityChecker, ReportGenerator, etc.)
+# ... [El resto del código se mantiene igual que en tu versión original]
+
 class SearchSploitClient:
+    # ... [Código idéntico al original]
     def __init__(self, verbose=False):
         self.verbose = verbose
         self.cache = {}
@@ -1144,8 +1356,9 @@ class SearchSploitClient:
         
         self.cache[cve_id] = None
         return None
-        
+
 class VulnerabilityChecker:
+    # ... [Código idéntico al original]
     def __init__(self, nvd_client=None, use_nvd=True, exploit_client=None):
         self.nvd_client = nvd_client
         self.use_nvd = use_nvd
@@ -1298,7 +1511,7 @@ class ReportGenerator:
                     for vuln in vulns:
                         content += f'<div><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name={vuln}" target="_blank">{vuln}</a>'
                         
-                        # AÑADIR EXPLOITS SI HAY
+                        # ADD EXPLOITS IF AVAILABLE
                         if vuln in exploits and exploits[vuln]:
                             content += "<div class='exploit-list'>"
                             for exploit in exploits[vuln][:2]:  # Max 2 exploits
@@ -1384,6 +1597,50 @@ class ReportGenerator:
         
         print(f"{Colors.GREEN}[+] JSON report generated: {output_file}{Colors.END}")
 
+    @staticmethod
+    def generate_pwndoc_report(scan_results, output_file):
+        """Generate Pwndoc-compatible JSON report for enterprise pentesting"""
+        pwndoc_template = {
+            "name": "HellRecon Technology Assessment",
+            "version": "2.1",
+            "creator": "HellRecon PRO",
+            "created": datetime.now().isoformat(),
+            "tests": []
+        }
+        
+        for target, data in scan_results.items():
+            technologies = data['technologies']
+            vuln_checker = data['vuln_checker']
+            
+            for tech, info in technologies.items():
+                version = info['version']
+                tech_type = info['type']
+                
+                # USE THE FUNCTION WITH EXPLOITS
+                if hasattr(vuln_checker, 'check_technology_with_exploits'):
+                    vulns, exploits = vuln_checker.check_technology_with_exploits(tech, version, info.get('confidence', 'medium'))
+                else:
+                    vulns = vuln_checker.check_technology(tech, version)
+                    exploits = {}
+                
+                # Create finding for each technology with vulnerabilities
+                if vulns:
+                    finding = {
+                        "title": f"{tech} {version} - Technology Detection",
+                        "description": f"Identified {tech} version {version} with associated vulnerabilities.",
+                        "observation": f"The technology {tech} version {version} was detected during reconnaissance.",
+                        "proof": f"Detection method: {info.get('source', 'unknown')}. Confidence: {info.get('confidence', 'medium')}",
+                        "severity": "Info",  # Base severity, can be upgraded based on CVEs
+                        "cves": vulns,
+                        "exploits": list(exploits.keys()) if exploits else [],
+                        "references": [f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve}" for cve in vulns]
+                    }
+                    pwndoc_template["tests"].append(finding)
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(pwndoc_template, f, indent=2, ensure_ascii=False)
+        
+        print(f"{Colors.GREEN}[+] Pwndoc report generated: {output_file}{Colors.END}")
 
 def is_valid_wordpress_version(version):
     """
@@ -1459,8 +1716,14 @@ def get_wordpress_version_fallback(version_candidates):
     else:
         return None
 
-def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searchsploit=False, deep_wp_scan=False):
-    detector = TechnologyDetector(verbose=verbose)
+def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searchsploit=False, deep_wp_scan=False, method='GET', user_agent=None, delay=0):
+    detector = TechnologyDetector(verbose=verbose, method=method, user_agent=user_agent, delay=delay)
+    # Auto-detect method if not specified
+    if method == 'AUTO':
+        auto_method = detector.auto_detect_method(url)
+        if verbose:
+            print(f"{Colors.CYAN}[*] Auto-detected method: {auto_method}{Colors.END}")
+        detector.method = auto_method
     nvd_client = NVDClient(nvd_key) if use_nvd else None
     searchsploit_client = SearchSploitClient(verbose=verbose) if use_searchsploit else None
     vuln_checker = VulnerabilityChecker(nvd_client, use_nvd, searchsploit_client)
@@ -1468,12 +1731,16 @@ def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searc
     try:
         response = detector.session.get(url, timeout=10, allow_redirects=True)
         technologies = {}
+        technologies = {}
         tech_from_headers = detector.detect_from_headers(response.headers)
         technologies.update(tech_from_headers)
         tech_from_content = detector.detect_from_content(response.text)
         technologies.update(tech_from_content)
         
-    # NEW STRATEGY: SCORING SYSTEM FOR WORDPRESS
+        # Initialize version_candidates for all cases
+        version_candidates = {}
+        
+        # NEW STRATEGY: SCORING SYSTEM FOR WORDPRESS
         if 'WordPress' in technologies:
             if verbose:
                 print(f"{Colors.CYAN}[*] WordPress detected, launching multi-layer detection...{Colors.END}")
@@ -1511,8 +1778,8 @@ def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searc
             if checksum_version:
                 version_candidates[checksum_version] = version_candidates.get(checksum_version, 0) + 6
             
-        # SELECT BEST VERSION WITH VALIDATION
-        if version_candidates:
+        # SELECT BEST VERSION WITH VALIDATION (only if we have candidates)
+        if version_candidates and len(version_candidates) > 0:
             # Apply intelligent validation and fallback
             best_valid_version = get_wordpress_version_fallback(version_candidates)
             
@@ -1551,7 +1818,51 @@ def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searc
                 }
                 if verbose:
                     print(f"{Colors.YELLOW}[MULTI-LAYER] WordPress detected but version could not be determined{Colors.END}")
+                    
+        # APPLICATION SERVERS DETECTION - ENHANCED VERSION
+        # Tomcat version detection for Coyote servers
+        if 'Tomcat' in technologies and technologies['Tomcat']['version'] == 'Unknown':
+            tomcat_version = detector.aggressive_tomcat_version_hunt(url)
+            if tomcat_version:
+                technologies['Tomcat']['version'] = tomcat_version
+                technologies['Tomcat']['confidence'] = 'high'
+                if verbose:
+                    print(f"{Colors.GREEN}[*] Tomcat version found: {tomcat_version}{Colors.END}")
+
+        # JBoss detection from headers or content
+        jboss_indicators = ['JBoss', 'jboss', 'JBossAS', 'JBossWeb']
+        if any(indicator in str(technologies) for indicator in jboss_indicators) or \
+           any(indicator in str(response.headers) for indicator in jboss_indicators) or \
+           any(indicator in response.text for indicator in jboss_indicators):
             
+            jboss_version = detector.aggressive_jboss_detection(url)
+            if jboss_version:
+                technologies['JBoss'] = {
+                    'type': 'server',
+                    'version': jboss_version,
+                    'confidence': 'medium',
+                    'source': 'aggressive_detection'
+                }
+                if verbose:
+                    print(f"{Colors.GREEN}[*] JBoss version found: {jboss_version}{Colors.END}")
+
+        # WebLogic detection
+        weblogic_indicators = ['WebLogic', 'weblogic', 'WebLogicServer', 'Oracle-WebLogic']
+        if any(indicator in str(technologies) for indicator in weblogic_indicators) or \
+           any(indicator in str(response.headers) for indicator in weblogic_indicators) or \
+           any(indicator in response.text for indicator in weblogic_indicators):
+            
+            weblogic_version = detector.aggressive_weblogic_detection(url)
+            if weblogic_version:
+                technologies['WebLogic'] = {
+                    'type': 'server', 
+                    'version': weblogic_version,
+                    'confidence': 'medium',
+                    'source': 'aggressive_detection'
+                }
+                if verbose:
+                    print(f"{Colors.GREEN}[*] WebLogic version found: {weblogic_version}{Colors.END}")
+
         # Enhanced WooCommerce version detection (keep as is)
         if 'WooCommerce' in technologies and technologies['WooCommerce']['version'] == 'Unknown':
             wc_detailed_version = detector.extract_woocommerce_details(url)
@@ -1564,6 +1875,7 @@ def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searc
                 }
                 if verbose:
                     print(f"{Colors.GREEN}[WOOCOMMERCE] Detailed version found: {wc_detailed_version}{Colors.END}")
+
         # Enhanced plugin and theme version detection
         if 'WordPress' in technologies:
             # Detect plugin versions
@@ -1588,6 +1900,7 @@ def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searc
                     if theme_version != 'Unknown':
                         technologies[tech_name]['version'] = theme_version
                         technologies[tech_name]['confidence'] = 'medium'
+
     except Exception as e:
         if verbose:
             print(f"{Colors.RED}[ERROR] Scanning {url}: {e}{Colors.END}")
@@ -1598,16 +1911,15 @@ def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searc
         'technologies': technologies,
         'vuln_checker': vuln_checker,
         'response': response
-    } 
+    }
 
 def main():
-    show_banner()
     parser = ArgumentParser(description='HellRecon PRO - Advanced technology intelligence scanner')
     parser.add_argument('--nvd-key', help='NVD API key (overrides config file)')
     parser.add_argument('target', nargs='*', help='Target URL(s) to scan')
     parser.add_argument('-f', '--file', help='File containing list of URLs')
     parser.add_argument('-o', '--output', help='Output file for results')
-    parser.add_argument('--format', choices=['html', 'csv', 'json'], default='none', help='Report format')
+    parser.add_argument('--report-format', choices=['html', 'csv', 'json', 'pwndoc'], default='none', help='Report format')
     parser.add_argument('--timeout', type=int, default=10, help='Request timeout')
     parser.add_argument('-v', '--verbose', action='store_true', help='Show debug information')
     parser.add_argument('--no-nvd', action='store_true', help='Disable NVD API lookups')
@@ -1615,8 +1927,12 @@ def main():
     parser.add_argument('--deep-wp-scan', action='store_true', help='Deep WordPress version scanning for hardened sites')
     parser.add_argument('--update-searchsploit', action='store_true', help='Update SearchSploit database before scanning')
     parser.add_argument('--threads', type=int, default=5, help='Number of threads for batch scanning')
+    parser.add_argument('--method', choices=['GET', 'POST', 'HEAD', 'AUTO'], default='GET', help='HTTP method for scanning (default: GET)')
+    parser.add_argument('--user-agent', help='Custom User-Agent string')
+    parser.add_argument('--delay', type=float, default=0, help='Delay between requests in seconds')
+    parser.add_argument('--format', choices=['html', 'csv', 'json', 'pwndoc'], default='none', help='Report format')
     args = parser.parse_args()
-
+    show_banner(args.method)
     targets = []
     if args.target:
         targets.extend(args.target)
@@ -1647,19 +1963,29 @@ def main():
         client.update_database()
         
     print(f"{Colors.CYAN}[*] Starting scan of {len(valid_targets)} target(s){Colors.END}")
-    print(f"{Colors.CYAN}[*] Threads: {args.threads} | NVD: {not args.no_nvd} | Format: {args.format}{Colors.END}")
+    print(f"{Colors.CYAN}[*] Threads: {args.threads} | NVD: {not args.no_nvd} | Method: {args.method}{Colors.END}")
     print("-" * 60)
 
     start_time = time.time()
     scan_results = {}
 
     if len(valid_targets) == 1:
-        result = scan_single_target(valid_targets[0], args.verbose, not args.no_nvd, args.nvd_key, args.searchsploit, args.deep_wp_scan)
+        result = scan_single_target(
+            valid_targets[0], 
+            args.verbose, 
+            not args.no_nvd, 
+            args.nvd_key, 
+            args.searchsploit, 
+            args.deep_wp_scan,
+            args.method,
+            args.user_agent,
+            args.delay
+        )
         scan_results[valid_targets[0]] = result
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
             future_to_url = {
-                executor.submit(scan_single_target, url, args.verbose, not args.no_nvd, args.nvd_key, args.searchsploit): url
+                executor.submit(scan_single_target, url, args.verbose, not args.no_nvd, args.nvd_key, args.searchsploit, args.deep_wp_scan, args.method, args.user_agent, args.delay): url
                 for url in valid_targets
             }
             for future in concurrent.futures.as_completed(future_to_url):
@@ -1670,6 +1996,21 @@ def main():
                     print(f"{Colors.GREEN}[+] Completed: {url}{Colors.END}")
                 except Exception as e:
                     print(f"{Colors.RED}[ERROR] Failed scanning {url}: {e}{Colors.END}")
+                        
+                    url = future_to_url[future]
+                    try:
+                        result = future.result(timeout=2)
+                        scan_results[url] = result
+                        print(f"{Colors.GREEN}[+] Completed: {url}{Colors.END}")
+                    except concurrent.futures.TimeoutError:
+                        continue
+                    except Exception as e:
+                        print(f"{Colors.RED}[ERROR] Failed scanning {url}: {e}{Colors.END}")
+                            
+                except KeyboardInterrupt:
+                    print(f"{Colors.YELLOW}[!] Immediate shutdown requested{Colors.END}")
+                    for f in future_to_url:
+                        f.cancel()
     total_tech = 0
     total_vuln = 0
     for url, data in scan_results.items():
@@ -1722,12 +2063,14 @@ def main():
                 print(f"{icon} {color}{tech} {version}{Colors.END} - {tech_type} {confidence_icon}")
 
     if args.output:
-        if args.format == 'html' or args.format is None:  # HTML by Default
+        if args.report_format == 'html' or args.report_format is None:
             ReportGenerator.generate_html_report(scan_results, args.output)
-        elif args.format == 'csv':
+        elif args.report_format == 'csv':
             ReportGenerator.generate_csv_report(scan_results, args.output)
-        elif args.format == 'json':
+        elif args.report_format == 'json':
             ReportGenerator.generate_json_report(scan_results, args.output)
+        elif args.report_format == 'pwndoc':
+            ReportGenerator.generate_pwndoc_report(scan_results, args.output)
 
     total_time = time.time() - start_time
     print(f"\n{Colors.CYAN}[*] Scan completed in {total_time:.2f} seconds{Colors.END}")
