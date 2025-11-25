@@ -1,6 +1,6 @@
 Advanced Technology Intelligence Scanner with Vulnerability and Exploit Integration
 
-# HellRecon PRO v2.1
+# HellRecon PRO v2.2
 
 ## Features:
 - **Detection of 50+ technologies** (servers, CMS, frameworks, WAFs, CDNs)
@@ -20,6 +20,7 @@ Advanced Technology Intelligence Scanner with Vulnerability and Exploit Integrat
 - **Multithreaded scanning**
 - **Colored console output with exploit visualization**
 - **Custom User-Agent and request delay** support for stealth scanning
+- **CVSS-based severity calculation** for accurate risk assessment **NEW** <-
 
 ## Usage:
 - **Basic scan**: `python3 hellRecon.py https://example.com`
