@@ -1,70 +1,83 @@
-Advanced Technology Intelligence Scanner with Vulnerability and Exploit Integration
+# hellRecon
 
-# HellRecon PRO v2.2
+**Advanced technology intelligence scanner with vulnerability correlation and secret-leak detection for web applications.**
 
-## Features:
-- **Detection of 50+ technologies** (servers, CMS, frameworks, WAFs, CDNs)
-- **Multi-layer WordPress version detection** with intelligent scoring system
-- **WordPress plugin and theme detection** with version extraction  
-- **Advanced validation systems** to eliminate false positives
-- **Enhanced HTML metadata parsing** for version detection in titles and meta tags
-- **Aggressive content scanning** for technologies like Tomcat, JBoss, and WebLogic
-- **Multi-method HTTP scanning** (GET, POST, HEAD, AUTO) with WAF bypass capabilities
-- **Intelligent version fallback system** for hardened WordPress sites
-- **Pwndoc-compatible JSON reports** for enterprise penetration testing
-- **Automatic CVE lookup using NVD API**
-- **Local exploit integration with SearchSploit**
-- **Automatic SearchSploit database updates**
-- **HTML/CSV/JSON reports with exploit information**
-- **Professional JSON reports** with full metadata and statistics
-- **Multithreaded scanning**
-- **Colored console output with exploit visualization**
-- **Custom User-Agent and request delay** support for stealth scanning
-- **CVSS-based severity calculation** for accurate risk assessment **NEW** <-
+## What is hellRecon?
 
-## Usage:
-- **Basic scan**: `python3 hellRecon.py https://example.com`
-- **Deep WordPress scan**: `python3 hellRecon.py https://example.com --deep-wp-scan -v`
-- **Scan with exploit lookup**: `python3 hellRecon.py https://example.com --searchsploit`
-- **Update database and scan**: `python3 hellRecon.py https://example.com --update-searchsploit`
-- **Batch scan with threads**: `python3 hellRecon.py -f targets.txt --threads 10`
-- **Scan without NVD API**: `python3 hellRecon.py https://example.com --no-nvd`
-- **POST method scanning for WAF bypass**: `python3 hellRecon.py https://example.com --method POST`
-- **Auto-detect HTTP method**: `python3 hellRecon.py https://example.com --method AUTO`
-- **Custom User-Agent with delay**: `python3 hellRecon.py https://example.com --user-agent "Mobile Browser" --delay 1.0`
-- **Pwndoc report generation**: `python3 hellRecon.py https://example.com --report-format pwndoc -o pentest_report.json`
+hellRecon is a Python-based reconnaissance tool that fingerprints web technologies, correlates them with public CVE databases, and hunts for leaked secrets in JavaScript bundles. Designed for penetration testers who need fast, accurate and actionable data about their targets.
 
-## Generate Reports:
-- **HTML report**: `python3 hellRecon.py https://example.com -o report.html --format html`
-- **JSON report**: `python3 hellRecon.py https://example.com -o report.json --format json` 
-- **CSV report**: `python3 hellRecon.py https://example.com -o report.csv --format csv`
-- **Pwndoc report**: `python3 hellRecon.py https://example.com -o pentest.json --format pwndoc`
+**New in v3.0-alpha:** Token-Leak Hunter module – automatically discovers hard-coded secrets (GitHub PATs, AWS keys, Slack tokens, RSA keys, etc.) with entropy-based detection and live verification.
 
-# Installation
-git clone https://github.com/akil3s79/hellRecon
+## Why I Built This
 
-cd hellRecon
+While existing recon tools show banners or headers, I wanted something that:
+- **Identifies exact technology versions** (Tomcat 7.0.88, WordPress 5.7.2, etc.)
+- **Correlates versions with public CVEs** in seconds
+- **Hunts secrets inside JS bundles** without exposing full credentials
+- **Exports professional reports** (HTML, CSV, JSON, Pwndoc) for client deliverables
+- **Works out-of-the-box** with zero configuration and intuitive CLI
 
-(SearchSploit comes pre-installed in Kali Linux)
+## Key Features
 
-# Requirements:
-- **Python 3.x**
-- **requests library** - `pip install requests`
-- **SearchSploit** (pre-installed in Kali Linux)
+- **Deep version detection** – Apache, Nginx, WordPress, Joomla, Django, Spring, etc.
+- **CVE correlation** – automatic lookup against NVD (free API key supported)
+- **Token-Leak Hunter** – entropy-based secret discovery in inline & external JS
+- **Multi-layer WordPress scan** – checksum, aggressive hunt, fingerprinting
+- **Smart tomcat/jboss/weblogic hunt** – version extraction from manager paths
+- **Professional reports** – HTML, CSV, JSON, Pwndoc-compatible
+- **Multi-target support** – scan list of URLs with configurable threads
+- **Authenticated testing** – cookies, headers, basic auth, POST mode
+- **Cross-platform** – full color output on Windows, Linux, macOS
+- **CI-friendly** – clean JSON mode for pipelines
+
+## Installation
+
+`pip3 install -r requirements.txt`
+
+## Usage Examples
+
+- Basic scan:  
+  `python3 hellRecon.py https://target.com`
+
+- Scan + secret hunt (verbose):  
+  `python3 hellRecon.py https://target.com --token-leak -v`
+
+- Deep WordPress version + plugins:  
+  `python3 hellRecon.py https://blog.com --deep-wp-scan -v`
+
+- Multi-target with threads:  
+  `python3 hellRecon.py -f urls.txt -t 20`
+
+- Authenticated scan (cookies):  
+  `python3 hellRecon.py https://admin.site.com -c "session=abc123" --token-leak`
+
+- CVE lookup + exploit search:  
+  `python3 hellRecon.py https://site.com --nvd-key YOUR_NVD_API_KEY --searchsploit`
+
+- Export Pwndoc JSON:  
+  `python3 hellRecon.py https://client.com --token-leak --format pwndoc -o report.json`
+
+- CI pipeline (clean JSON):  
+  `python3 hellRecon.py https://ci.target.com --format json --ci`
+
+## Token-Leak Hunter Output
+[LEAK] Critical: github_pat at https://example.com/js/app.js:42 (entropy 5.1) redacted=ghp_⋯abcd
+[LEAK] High: slack_token at https://example.com/js/chat.js:17 (entropy 4.5) redacted=xoxb⋯wxyz
+
+## Technology Detection Samples
+[SERVER] Tomcat 7.0.88 - server
+└── CVE-2018-8014
+└── CVE-2018-8034
+[CMS] WordPress 5.7.2 - cms ✓
+└── CVE-2021-24291
 
 ## Legal Notice
-This tool is intended for:
-- **Authorized penetration testing**
-- **Security research**  
-- **Educational purposes**
 
-**Only use HellRecon on systems you own or have explicit permission to test.**
+This tool is intended for authorized penetration testing, security research and educational purposes only.  
+**Only use hellRecon on systems you own or have explicit permission to test.**
 
-## Contributing
-Found a bug? Have a feature request? Feel free to open an issue or pull request!
+## Buy Me a Coffee
 
-## You can buy me a coffee if you want!
-<a href="https://www.buymeacoffee.com/akil3s1979" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="27" width="104"></a>
-
-## Puedes invitarme a un café si quieres!
-<a href="https://www.buymeacoffee.com/akil3s1979" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="27" width="104"></a>
+<a href="https://www.buymeacoffee.com/akil3s1979" target="_blank">
+  <img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="27" width="104">
+</a>

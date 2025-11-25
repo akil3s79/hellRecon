@@ -3,7 +3,7 @@
 HellRecon - Advanced technology scanner with vulnerability intelligence
 Author: akil3s
 """
-
+import math
 import subprocess
 import requests
 import sys
@@ -20,6 +20,7 @@ from datetime import datetime
 from argparse import ArgumentParser
 from urllib3.exceptions import InsecureRequestWarning
 from urllib.parse import urljoin
+
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C for graceful exit"""
@@ -1163,6 +1164,9 @@ class TechnologyDetector:
                 continue
         return 'Unknown'
 
+    def scan_token_leak(self, base_url: str) -> list:
+        return scan_token_leak(base_url, self.session, self.verbose)
+
 class SearchSploitClient:
     def __init__(self, verbose=False):
         self.verbose = verbose
@@ -1408,6 +1412,8 @@ class ReportGenerator:
                 technologies = data['technologies']
                 vuln_checker = data['vuln_checker']
                 for tech, info in technologies.items():
+                    if isinstance(info, list):
+                        continue
                     version = info['version']
                     tech_type = info['type']
                     vulns = vuln_checker.check_technology(tech, version)
@@ -1530,7 +1536,7 @@ def get_wordpress_version_fallback(version_candidates):
     else:
         return None
 
-def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searchsploit=False, deep_wp_scan=False, method='GET', user_agent=None, delay=0):
+def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searchsploit=False, deep_wp_scan=False, method='GET', user_agent=None, delay=0, token_leak=False):
     detector = TechnologyDetector(verbose=verbose, method=method, user_agent=user_agent, delay=delay)
     if method == 'AUTO':
         auto_method = detector.auto_detect_method(url)
@@ -1685,6 +1691,12 @@ def scan_single_target(url, verbose=False, use_nvd=True, nvd_key=None, use_searc
         technologies = {}
         response = None
 
+    if token_leak:
+        technologies["token_leaks"] = detector.scan_token_leak(url)
+        for lk in technologies["token_leaks"]:
+            sev_col = {"Critical": Colors.RED, "High": Colors.ORANGE, "Medium": Colors.YELLOW, "Low": Colors.CYAN}[lk["severity"]]
+            print(f"{sev_col}[LEAK]{Colors.END} {lk['severity']}: {lk['type']} at {lk['url']}:{lk['line']}  (entropy {lk['entropy']})  redacted={lk['secret_redacted']}")
+
     return {
         'technologies': technologies,
         'vuln_checker': vuln_checker,
@@ -1708,6 +1720,7 @@ def main():
     parser.add_argument('--method', choices=['GET', 'POST', 'HEAD', 'AUTO'], default='GET', help='HTTP method for scanning (default: GET)')
     parser.add_argument('--user-agent', help='Custom User-Agent string')
     parser.add_argument('--delay', type=float, default=0, help='Delay between requests in seconds')
+    parser.add_argument('--token-leak', action='store_true', help='Hunt for leaked tokens in JS')
     args = parser.parse_args()
     show_banner(args.method)
     targets = []
@@ -1756,13 +1769,14 @@ def main():
             args.deep_wp_scan,
             args.method,
             args.user_agent,
-            args.delay
+            args.delay,
+            args.token_leak
         )
         scan_results[valid_targets[0]] = result
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
             future_to_url = {
-                executor.submit(scan_single_target, url, args.verbose, not args.no_nvd, args.nvd_key, args.searchsploit, args.deep_wp_scan, args.method, args.user_agent, args.delay): url
+                executor.submit(scan_single_target, url, args.verbose, not args.no_nvd, args.nvd_key, args.searchsploit, args.deep_wp_scan, args.method, args.user_agent, args.delay,args.token_leak): url
                 for url in valid_targets
             }
             for future in concurrent.futures.as_completed(future_to_url):
@@ -1783,6 +1797,8 @@ def main():
             print(f"\n{Colors.CYAN}[*] Results for: {url}{Colors.END}")
             print("-" * 50)
         for tech, info in technologies.items():
+            if isinstance(info, list):
+                continue
             total_tech += 1
             version = info['version']
             tech_type = info['type']
@@ -1836,5 +1852,98 @@ def main():
     if args.output:
         print(f"{Colors.GREEN}[+] Report saved to: {args.output}{Colors.END}")
 
+def scan_token_leak(base_url: str, session, verbose: bool = False) -> list:
+    return token_leak_hunt(base_url, session, verbose)
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# TOKEN-LEAK HUNTER v3.0-alpha – 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+_TOKEN_RULES = {
+    "github_pat":  {"pattern": re.compile(r"ghp_[0-9a-zA-Z]{36}"),           "entropy": 4.5},
+    "aws_access":  {"pattern": re.compile(r"AKIA[0-9A-Z]{16}"),              "entropy": 4.0},
+    "slack_token": {"pattern": re.compile(r"xox[baprs]-[0-9]{10,48}"),        "entropy": 4.3},
+    "google_api":  {"pattern": re.compile(r"AIza[0-9A-Z_-]{35}"),             "entropy": 3.8},
+    "private_rsa": {"pattern": re.compile(r"-----BEGIN RSA PRIVATE KEY-----"), "entropy": 5.5},
+    "generic_high":{"pattern": re.compile(r"[0-9a-zA-Z+/]{40,}"),             "entropy": 5.0},
+}
+
+def _redact(secret: str) -> str:
+    if len(secret) <= 8:
+        return secret[0] + "⋯" + secret[-1]
+    return secret[:4] + "⋯" + secret[-4:]
+
+def _entropy(s: str) -> float:
+    if not s: return 0.0
+    freqs = {c: s.count(c) for c in set(s)}
+    return -sum((f / len(s)) * math.log2(f / len(s)) for f in freqs.values())
+
+def _verify_github(token: str) -> bool:
+    try:
+        r = requests.get("https://api.github.com/user",
+                         headers={"Authorization": f"token {token}"}, timeout=3)
+        return r.status_code == 200 and "login" in r.json()
+    except: return False
+
+def _verify_aws(key: str) -> bool:
+    try:
+        r = requests.post("https://sts.amazonaws.com/",
+                          data={"Action": "GetCallerIdentity", "Version": "2011-06-15"},
+                          headers={"Authorization": f"AWS4-HMAC-SHA256 Credential={key}/"}, timeout=3)
+        return r.status_code == 200
+    except: return False
+
+def _verify_slack(token: str) -> bool:
+    try:
+        r = requests.get("https://slack.com/api/auth.test",
+                         headers={"Authorization": f"Bearer {token}"}, timeout=3)
+        return r.json().get("ok") is True
+    except: return False
+
+_VERIFY_FNS = {"github_pat": _verify_github, "aws_access": _verify_aws, "slack_token": _verify_slack}
+
+def _severity(typ: str, verified: bool, ent: float) -> str:
+    if verified:
+        return "Critical" if typ in {"github_pat", "aws_access", "google_api"} else "High"
+    return "Medium" if ent >= 5.0 else "Low"
+
+def _token_leak_single_line(line: str, url: str, line_no: int) -> list:
+    leaks = []
+    for typ, rule in _TOKEN_RULES.items():
+        for hit in rule["pattern"].findall(line):
+            secret = hit if isinstance(hit, str) else hit[0]
+            ent = _entropy(secret)
+            if ent < rule["entropy"]: continue
+            verified = _VERIFY_FNS.get(typ, lambda _: False)(secret)
+            leaks.append({
+                "url": url,
+                "line": line_no,
+                "type": typ,
+                "secret_redacted": _redact(secret),
+                "entropy": round(ent, 2),
+                "verified": verified,
+                "severity": _severity(typ, verified, ent),
+            })
+    return leaks
+
+def token_leak_hunt(base_url: str, session, verbose: bool = False) -> list:
+    all_leaks = []
+    try:
+        html = session.get(base_url, timeout=8).text
+        for no, line in enumerate(html.splitlines(), 1):
+            all_leaks.extend(_token_leak_single_line(line, base_url, no))
+        script_urls = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html)
+        for rel in script_urls:
+            abs_url = urljoin(base_url, rel)
+            js = session.get(abs_url, timeout=8).text
+            for no, line in enumerate(js.splitlines(), 1):
+                all_leaks.extend(_token_leak_single_line(line, abs_url, no))
+    except Exception as e:
+        if verbose: print(f"{Colors.YELLOW}[TOKEN-LEAK] Error: {e}{Colors.END}")
+    if verbose and all_leaks:
+        print(f"{Colors.CYAN}[TOKEN-LEAK] {len(all_leaks)} candidate(s){Colors.END}")
+    return all_leaks
+    
 if __name__ == "__main__":
     main()
